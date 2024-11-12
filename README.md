@@ -664,3 +664,180 @@ Common Threads Across Implementations:
 3. Main differences lie in higher-level abstractions
 4. Choice of primitives often influenced by porting considerations
 5. Mach-based systems have more freedom in primitive selection due to less legacy code
+
+6. I'll help solve these exercises systematically:
+
+1. Implementing atomic test-and-set using swap-atomic:
+```c
+bool test_and_set(bool *lock) {
+    bool old_value = true;
+    swap_atomic(&old_value, lock);
+    return old_value;
+}
+```
+
+2. Implementing test-and-set using load-linked/store-conditional:
+```c
+bool test_and_set(bool *lock) {
+    bool old_value;
+    do {
+        old_value = load_linked(lock);
+        if (old_value) return true;
+    } while (!store_conditional(lock, true));
+    return false;
+}
+```
+
+3. Dividing a semaphore-protected region:
+Yes, splitting a critical region into two separate regions with different semaphores would help reduce convoy formation because:
+- Less contention per semaphore
+- Threads can progress independently in each region
+- Reduced waiting time overall
+
+4. Replacing semaphore with another locking mechanism:
+Yes, this could risk starvation. For example:
+- Using a simple spin lock might cause low-priority threads to starve
+- Solution: Use fair locking mechanisms or priority inheritance
+
+5. Reference count vs. shared lock:
+- Reference count: Tracks number of users, no mutual exclusion
+- Shared lock: Provides read-only access with mutual exclusion from writers
+
+6. Implementing blocking lock:
+```c
+struct blocking_lock {
+    spinlock_t sl;
+    condition_t cond;
+    bool locked;
+};
+
+void acquire_lock(struct blocking_lock *l) {
+    spin_lock(&l->sl);
+    while (l->locked) {
+        wait(&l->cond, &l->sl);
+    }
+    l->locked = true;
+    spin_unlock(&l->sl);
+}
+
+void release_lock(struct blocking_lock *l) {
+    spin_lock(&l->sl);
+    l->locked = false;
+    signal(&l->cond);
+    spin_unlock(&l->sl);
+}
+```
+
+7. Releasing spin lock during flag clearing:
+Yes, it's necessary to hold the spin lock while clearing the flag to maintain atomicity and prevent race conditions.
+
+8. Condition variables and lost wakeup:
+They avoid lost wakeups by:
+- Atomically releasing lock and entering wait state
+- Maintaining wait queues
+- Ensuring signal/broadcast operations wake waiting threads
+
+9. Event with status value:
+```c
+struct event {
+    spinlock_t sl;
+    condition_t cond;
+    bool completed;
+    int status;
+};
+
+void wait_event(struct event *e, int *status) {
+    spin_lock(&e->sl);
+    while (!e->completed) {
+        wait(&e->cond, &e->sl);
+    }
+    *status = e->status;
+    spin_unlock(&e->sl);
+}
+
+void complete_event(struct event *e, int status) {
+    spin_lock(&e->sl);
+    e->completed = true;
+    e->status = status;
+    broadcast(&e->cond);
+    spin_unlock(&e->sl);
+}
+```
+
+10. Mutex vs. read-write lock scenarios:
+Use mutex when:
+- Write operations are frequent
+- Critical sections are short
+- Overhead of read-write lock exceeds benefits
+- Simple mutual exclusion is sufficient
+
+11. Non-blocking read-write lock:
+```c
+struct spinrwlock {
+    atomic_t readers;
+    atomic_t writer;
+};
+
+bool try_read_lock(struct spinrwlock *l) {
+    while (true) {
+        if (atomic_read(&l->writer)) return false;
+        atomic_inc(&l->readers);
+        if (!atomic_read(&l->writer)) return true;
+        atomic_dec(&l->readers);
+    }
+}
+
+bool try_write_lock(struct spinrwlock *l) {
+    if (atomic_read(&l->readers) || 
+        !atomic_compare_exchange(&l->writer, 0, 1))
+        return false;
+    return true;
+}
+```
+
+12. Fine-grained locking avoiding deadlock:
+Example: Instead of locking an entire hash table, lock individual buckets to allow concurrent access to different parts.
+
+13. Coarse-grained locking avoiding deadlock:
+Example: Instead of locking individual nodes in a linked list (which could lead to circular wait), lock the entire list.
+
+14. Unlocked kernel access cases:
+- Read-only access to constant data
+- Per-CPU variables during non-preemptive execution
+- Already-protected data (higher-level lock)
+- Atomic operations
+- Interrupt-disabled sections
+
+15. Monitor usage scenarios:
+Monitors are ideal for:
+- Object-oriented synchronization
+- Data abstraction with built-in synchronization
+- Producer-consumer problems
+- Resource allocation systems
+
+16. Upgrade/Downgrade implementation for read-write lock:
+Already shown in the original text, but here's a summary:
+```c
+void upgrade(struct rwlock *r) {
+    spin_lock(&r->sl);
+    if (r->nActive == 1) {  // Sole reader
+        r->nActive = -1;
+    } else {
+        r->nPendingWrites++;
+        r->nActive--;
+        while (r->nActive)
+            wait(&r->canWrite, &r->sl);
+        r->nPendingWrites--;
+        r->nActive = -1;
+    }
+    spin_unlock(&r->sl);
+}
+
+void downgrade(struct rwlock *r) {
+    spin_lock(&r->sl);
+    r->nActive = 1;
+    if (r->nPendingReads)
+        broadcast(&r->canRead);
+    spin_unlock(&r->sl);
+}
+```
